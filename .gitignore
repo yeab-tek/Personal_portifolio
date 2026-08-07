@@ -1,0 +1,22 @@
+# Environment secrets
+.env
+backend/.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Database
+*.db
+backend/portfolio.db
+
+# Editor/OS junk
+.vscode/
+.DS_Store
