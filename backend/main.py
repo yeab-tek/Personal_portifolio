@@ -1,10 +1,9 @@
 import os
+import secrets
 from dotenv import load_dotenv
-import smtplib
 from datetime import datetime, timedelta
 from typing import List, Optional
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import resend
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -21,9 +20,24 @@ from passlib.context import CryptContext
 load_dotenv()
 
 # Configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "yeabsira_fastapi_cinematic_secret_2026")
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    # Falls back to a random key generated at startup so the app never runs
+    # with a publicly-known secret. NOTE: this means tokens won't survive a
+    # restart/redeploy unless you set SECRET_KEY yourself on Render.
+    SECRET_KEY = secrets.token_urlsafe(32)
+    print("⚠️  SECRET_KEY not set in environment — generated a temporary one for this run.")
+    print("⚠️  Set SECRET_KEY in Render's Environment tab so tokens stay valid across restarts.")
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 Hours
+
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "yeabsira")
+
+# Resend Email Configuration
+resend.api_key = os.getenv("RESEND_API_KEY")
+NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL")
+RESEND_FROM = os.getenv("RESEND_FROM", "onboarding@resend.dev")
 
 # Database Setup (SQLite for development, easily switchable to PostgreSQL)
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -35,9 +49,6 @@ if not DATABASE_URL:
         "that load_dotenv() can find it."
     )
 
-# Helpful sanity check: catch a common copy-paste mistake where the Supabase
-# pooler username (postgres.<project-ref>) doesn't match what's in the URL,
-# or the URL still has placeholder brackets in it.
 if "postgresql" in DATABASE_URL and "pooler.supabase.com" in DATABASE_URL:
     if "postgres." not in DATABASE_URL.split("@")[0]:
         print(
@@ -51,8 +62,6 @@ connect_args = {"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
 
 try:
     engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
-    # Fail fast with a clear message instead of letting the error surface
-    # deep inside a request handler later.
     with engine.connect() as _conn:
         pass
 except OperationalError as e:
@@ -87,10 +96,10 @@ class DBProject(Base):
     __tablename__ = "projects"
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, index=True)
-    category = Column(String)  # 'dev' or 'media'
+    category = Column(String)
     company_tag = Column(String, nullable=True)
     description = Column(Text)
-    tech_stack = Column(String)  # Comma separated
+    tech_stack = Column(String)
     link = Column(String, nullable=True)
 
 class DBMessage(Base):
@@ -106,10 +115,15 @@ Base.metadata.create_all(bind=engine)
 # Seed Initial Data if empty
 def init_db():
     db = SessionLocal()
-    if not db.query(DBUser).filter(DBUser.username == "yeabsira").first():
+    if not db.query(DBUser).filter(DBUser.username == ADMIN_USERNAME).first():
+        admin_password = os.getenv("ADMIN_INITIAL_PASSWORD")
+        if not admin_password:
+            admin_password = secrets.token_urlsafe(12)
+            print(f"⚠️  No ADMIN_INITIAL_PASSWORD set. One-time generated admin password: {admin_password}")
+            print("⚠️  Copy this from the logs now, log in, then change it via /api/auth/change-password.")
         admin_user = DBUser(
-            username="yeabsira",
-            password_hash=pwd_context.hash("yeab1234")
+            username=ADMIN_USERNAME,
+            password_hash=pwd_context.hash(admin_password)
         )
         db.add(admin_user)
 
@@ -168,12 +182,21 @@ class ContactMessageSchema(BaseModel):
     email: EmailStr
     message: str
 
+class ChangePasswordSchema(BaseModel):
+    current_password: str
+    new_password: str
+
 # FastAPI Application
 app = FastAPI(title="Yeabsira Teklu Cinematic Portfolio API", version="2.0.0")
 
+ALLOWED_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:5173,https://personal-portifolio-black.vercel.app"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -207,52 +230,40 @@ def get_current_admin(token: str = Depends(oauth2_scheme), db: Session = Depends
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
-# Email Sending Utility
+# Email Sending Utility (via Resend)
 def send_email_notification(name: str, email: str, message_body: str):
-    smtp_host = os.getenv("SMTP_HOST")
-    smtp_port_raw = os.getenv("SMTP_PORT")
-    smtp_user = os.getenv("SMTP_USER")
-    smtp_pass = os.getenv("SMTP_PASS")
-    target_email = os.getenv("NOTIFICATION_EMAIL")
+    if not resend.api_key or not NOTIFY_EMAIL:
+        print("Resend not configured: RESEND_API_KEY or NOTIFY_EMAIL missing.")
+        return False
 
-    if smtp_host and smtp_user and smtp_pass and smtp_port_raw:
-        try:
-            smtp_port = int(smtp_port_raw)
-            msg = MIMEMultipart()
-            msg["From"] = smtp_user
-            msg["To"] = target_email
-            msg["Subject"] = f"New Portfolio Inquiry from {name}"
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; background: #0b0f17; color: #f1f5f9; padding: 20px;">
+        <h2 style="color: #2dd4bf;">New Hire Me Inquiry</h2>
+        <p><strong>Name:</strong> {name}</p>
+        <p><strong>Email:</strong> {email}</p>
+        <p><strong>Message:</strong></p>
+        <blockquote style="background: #1e293b; padding: 15px; border-left: 4px solid #f59e0b;">{message_body}</blockquote>
+    </div>
+    """
 
-            html_body = f"""
-            <div style="font-family: Arial, sans-serif; background: #0b0f17; color: #f1f5f9; padding: 20px;">
-                <h2 style="color: #2dd4bf;">New Hire Me Inquiry</h2>
-                <p><strong>Name:</strong> {name}</p>
-                <p><strong>Email:</strong> {email}</p>
-                <p><strong>Message:</strong></p>
-                <blockquote style="background: #1e293b; padding: 15px; border-left: 4px solid #f59e0b;">{message_body}</blockquote>
-            </div>
-            """
-            msg.attach(MIMEText(html_body, "html"))
-
-            server = smtplib.SMTP(smtp_host, smtp_port)
-            server.starttls()
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(smtp_user, target_email, msg.as_string())
-            server.quit()
-            return True
-        except Exception as e:
-            print("Email sending error:", e)
-            return False
-    return False
+    try:
+        resend.Emails.send({
+            "from": RESEND_FROM,
+            "to": NOTIFY_EMAIL,
+            "subject": f"New Portfolio Inquiry from {name}",
+            "html": html_body,
+        })
+        return True
+    except Exception as e:
+        print("Resend email sending error:", e)
+        return False
 
 # --- ROUTES ---
 
-# 1. Public: Get All Projects
 @app.get("/api/projects", response_model=List[ProjectSchema])
 def get_projects(db: Session = Depends(get_db)):
     return db.query(DBProject).all()
 
-# 2. Public: Submit Contact / Hire Me Message
 @app.post("/api/contact")
 def submit_contact(msg: ContactMessageSchema, db: Session = Depends(get_db)):
     db_msg = DBMessage(name=msg.name, email=msg.email, message=msg.message)
@@ -267,7 +278,6 @@ def submit_contact(msg: ContactMessageSchema, db: Session = Depends(get_db)):
         "email_sent": email_sent
     }
 
-# 3. Admin: Login (OAuth2 form format or JSON)
 @app.post("/api/auth/login", response_model=Token)
 def login_admin(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(DBUser).filter(DBUser.username == form_data.username).first()
@@ -280,7 +290,18 @@ def login_admin(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# 4. Admin: Add New Work/Project
+@app.post("/api/auth/change-password")
+def change_password(
+    payload: ChangePasswordSchema,
+    admin: DBUser = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    if not pwd_context.verify(payload.current_password, admin.password_hash):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    admin.password_hash = pwd_context.hash(payload.new_password)
+    db.commit()
+    return {"success": True, "message": "Password updated successfully"}
+
 @app.post("/api/admin/projects", response_model=ProjectSchema)
 def add_project(
     project: ProjectSchema,
@@ -300,7 +321,6 @@ def add_project(
     db.refresh(db_project)
     return db_project
 
-# 5. Admin: Update Work/Project
 @app.put("/api/admin/projects/{project_id}", response_model=ProjectSchema)
 def update_project(
     project_id: int,
@@ -323,7 +343,6 @@ def update_project(
     db.refresh(db_proj)
     return db_proj
 
-# 6. Admin: Delete Work/Project
 @app.delete("/api/admin/projects/{project_id}")
 def delete_project(
     project_id: int,
@@ -337,7 +356,6 @@ def delete_project(
     db.commit()
     return {"success": True, "message": "Project deleted successfully"}
 
-# 7. Admin: View Submitted Inquiries/Messages
 @app.get("/api/admin/messages")
 def get_messages(
     admin: DBUser = Depends(get_current_admin),
@@ -345,7 +363,6 @@ def get_messages(
 ):
     return db.query(DBMessage).order_by(DBMessage.created_at.desc()).all()
 
-# Serve Frontend Static Files
 frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.exists(frontend_path):
     app.mount("/", StaticFiles(directory=frontend_path, html=True), name="frontend")

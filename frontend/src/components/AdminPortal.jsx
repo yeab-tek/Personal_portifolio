@@ -1,17 +1,26 @@
 import React, { useState, useEffect } from 'react';
 
-// Explicit FastAPI Backend Base URL
-const API_BASE = 'http://localhost:8000';
+// Reads the deployed backend URL from Vercel's env vars. Locally, this is
+// left empty on purpose so requests go through Vite's dev-server proxy
+// (see vite.config.js) instead of hardcoding a port here.
+const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export default function AdminPortal({ onClose }) {
   const [token, setToken] = useState(localStorage.getItem('yeabsira_fastapi_admin_token') || '');
-  const [user, setUser] = useState('yeabsira');
-  const [pass, setPass] = useState('yeab1234');
+  const [user, setUser] = useState('');
+  const [pass, setPass] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [status, setStatus] = useState('');
   const [activeTab, setActiveTab] = useState('projects');
   const [projects, setProjects] = useState([]);
   const [messages, setMessages] = useState([]);
+
+  // Change Password Form State
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [passwordStatus, setPasswordStatus] = useState('');
+  const [passwordStatusIsError, setPasswordStatusIsError] = useState(false);
 
   // New Project Form State
   const [newProj, setNewProj] = useState({
@@ -45,7 +54,7 @@ export default function AdminPortal({ onClose }) {
         setStatus(data.detail || 'Login failed');
       }
     } catch (err) {
-      setStatus('Login error. Ensure Uvicorn is running on http://localhost:8000');
+      setStatus('Login error. Ensure the backend is running and reachable.');
     }
   };
 
@@ -108,6 +117,51 @@ export default function AdminPortal({ onClose }) {
     } catch (err) {}
   };
 
+  const handleChangePassword = async (e) => {
+    e.preventDefault();
+    setPasswordStatus('');
+    setPasswordStatusIsError(false);
+
+    if (newPassword !== confirmNewPassword) {
+      setPasswordStatus('New password and confirmation do not match.');
+      setPasswordStatusIsError(true);
+      return;
+    }
+    if (newPassword.length < 8) {
+      setPasswordStatus('New password should be at least 8 characters.');
+      setPasswordStatusIsError(true);
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/change-password`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setPasswordStatus('Password updated successfully.');
+        setPasswordStatusIsError(false);
+        setCurrentPassword('');
+        setNewPassword('');
+        setConfirmNewPassword('');
+      } else {
+        setPasswordStatus(data.detail || 'Failed to update password.');
+        setPasswordStatusIsError(true);
+      }
+    } catch (err) {
+      setPasswordStatus('Error reaching the backend. Please try again.');
+      setPasswordStatusIsError(true);
+    }
+  };
+
   return (
     <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(11,15,23,0.95)', backdropFilter: 'blur(15px)', zIndex: 2000, overflowY: 'auto', padding: '3rem 1rem' }}>
       <div className="container" style={{ maxWidth: '900px' }}>
@@ -161,10 +215,11 @@ export default function AdminPortal({ onClose }) {
           </div>
         ) : (
           <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2rem' }}>
-              <div style={{ display: 'flex', gap: '1rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
+              <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
                 <button className={`btn-action ${activeTab === 'projects' ? 'btn-teal' : 'btn-outline'}`} onClick={() => setActiveTab('projects')}>Manage Projects</button>
                 <button className={`btn-action ${activeTab === 'messages' ? 'btn-teal' : 'btn-outline'}`} onClick={() => setActiveTab('messages')}>Inbox Messages ({messages.length})</button>
+                <button className={`btn-action ${activeTab === 'settings' ? 'btn-teal' : 'btn-outline'}`} onClick={() => setActiveTab('settings')}>⚙ Settings</button>
               </div>
               <button onClick={handleLogout} className="btn-action btn-gold">Logout</button>
             </div>
@@ -218,7 +273,7 @@ export default function AdminPortal({ onClose }) {
                   </div>
                 </div>
               </div>
-            ) : (
+            ) : activeTab === 'messages' ? (
               <div className="glass">
                 <h3>Visitor Inquiries</h3>
                 {messages.length === 0 ? <p style={{ color: 'var(--text-muted)', marginTop: '1rem' }}>No messages received yet.</p> : (
@@ -234,6 +289,49 @@ export default function AdminPortal({ onClose }) {
                     ))}
                   </div>
                 )}
+              </div>
+            ) : (
+              <div className="glass" style={{ maxWidth: '450px' }}>
+                <h3 style={{ marginBottom: '1rem' }}>Change Admin Password</h3>
+                <form onSubmit={handleChangePassword}>
+                  <div className="form-group">
+                    <label>Current Password</label>
+                    <input
+                      type="password"
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>New Password</label>
+                    <input
+                      type="password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      required
+                      minLength={8}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Confirm New Password</label>
+                    <input
+                      type="password"
+                      value={confirmNewPassword}
+                      onChange={(e) => setConfirmNewPassword(e.target.value)}
+                      required
+                      minLength={8}
+                    />
+                  </div>
+                  <button type="submit" className="btn-action btn-teal width-100" style={{ marginTop: '0.5rem' }}>
+                    Update Password
+                  </button>
+                  {passwordStatus && (
+                    <p style={{ marginTop: '1rem', color: passwordStatusIsError ? '#ef4444' : '#2dd4bf', textAlign: 'center' }}>
+                      {passwordStatus}
+                    </p>
+                  )}
+                </form>
               </div>
             )}
           </div>
