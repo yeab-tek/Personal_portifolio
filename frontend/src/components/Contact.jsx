@@ -1,5 +1,10 @@
 import React, { useState } from 'react';
 
+// Reads the deployed backend URL from Vercel's env vars, same pattern as
+// AdminPortal.jsx. Left empty locally so requests go through Vite's dev
+// server proxy instead of a hardcoded port.
+const API_BASE = import.meta.env.VITE_API_URL || '';
+
 export default function Contact() {
   const [formData, setFormData] = useState({ name: '', email: '', message: '' });
   const [status, setStatus] = useState('');
@@ -9,7 +14,7 @@ export default function Contact() {
     setStatus('Sending message...');
 
     try {
-      const res = await fetch('http://localhost:8000/api/contact', {
+      const res = await fetch(`${API_BASE}/api/contact`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
@@ -22,8 +27,7 @@ export default function Contact() {
         setStatus(data.detail || 'Failed to send message.');
       }
     } catch (err) {
-      setStatus('Message received! Thank you for reaching out.');
-      setFormData({ name: '', email: '', message: '' });
+      setStatus('Could not reach the server. Please try again in a moment.');
     }
   };
 

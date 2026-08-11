@@ -1,11 +1,16 @@
 import React, { useState, useEffect } from 'react';
 
+// Reads the deployed backend URL from Vercel's env vars, same pattern as
+// Contact.jsx and AdminPortal.jsx. Left empty locally so requests go
+// through Vite's dev server proxy instead of a hardcoded port.
+const API_BASE = import.meta.env.VITE_API_URL || '';
+
 export default function Projects() {
   const [projects, setProjects] = useState([]);
   const [filter, setFilter] = useState('all');
 
   useEffect(() => {
-    fetch('/api/projects')
+    fetch(`${API_BASE}/api/projects`)
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) setProjects(data);
